@@ -5,9 +5,15 @@ import numpy as np
 import time
 import psutil
 from concurrent.futures import ThreadPoolExecutor
-import subprocess
 import json
 import shutil
+import sys
+
+# Add the path to the Instant-NGP Python bindings
+sys.path.append('/content/instant-ngp/build')
+
+# Import the Instant-NGP Python bindings
+import pyngp as ngp
 
 # Set up device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -43,8 +49,11 @@ def run_instant_ngp(image_folder, workspace_folder):
     # Prepare data for Instant-NGP
     prepare_instant_ngp_data(image_folder, workspace_folder)
     
-    # Train Instant-NGP
-    subprocess.run(["./build/instant-ngp", "--scene", f"{workspace_folder}/data"])
+    # Load the scene
+    scene = ngp.load_scene(f"{workspace_folder}/data")
+    
+    # Train the model
+    ngp.train(scene)
 
 # Main Execution
 if __name__ == "__main__":
