@@ -6,18 +6,41 @@ import time
 import psutil
 from concurrent.futures import ThreadPoolExecutor
 import subprocess
+import json
 
 # Set up device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
+
+# Function to prepare data for Instant-NGP
+def prepare_instant_ngp_data(image_folder, workspace_folder):
+    # Create the required directory structure
+    data_folder = os.path.join(workspace_folder, 'data')
+    os.makedirs(data_folder, exist_ok=True)
+    
+    # Copy images to the data folder
+    for filename in os.listdir(image_folder):
+        if filename.endswith('.jpg'):
+            shutil.copy(os.path.join(image_folder, filename), data_folder)
+    
+    # Generate a dummy transforms.json file (you need to replace this with actual camera poses)
+    transforms = {
+        "camera_angle_x": 0.6911112070083618,
+        "frames": [
+            {"file_path": f"./{filename}", "transform_matrix": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]}
+            for filename in os.listdir(data_folder) if filename.endswith('.jpg')
+        ]
+    }
+    
+    with open(os.path.join(data_folder, 'transforms.json'), 'w') as f:
+        json.dump(transforms, f, indent=4)
 
 # Function to run Instant-NGP for 3D reconstruction
 def run_instant_ngp(image_folder, workspace_folder):
     os.makedirs(workspace_folder, exist_ok=True)
     
     # Prepare data for Instant-NGP
-    # Assuming you have a script to prepare data for Instant-NGP
-    subprocess.run(["python", "prepare_instant_ngp_data.py", "--image_folder", image_folder, "--workspace_folder", workspace_folder])
+    prepare_instant_ngp_data(image_folder, workspace_folder)
     
     # Train Instant-NGP
     subprocess.run(["./build/testbed", "--scene", f"{workspace_folder}/data"])
