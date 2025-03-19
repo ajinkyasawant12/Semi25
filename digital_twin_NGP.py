@@ -8,6 +8,8 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import shutil
 import sys
+from transformers import AutoProcessor, AutoModelForDepthEstimation
+from huggingface_hub import login
 
 # Add the path to the Instant-NGP Python bindings
 sys.path.append('/content/instant-ngp/build')
@@ -19,31 +21,68 @@ import pyngp as ngp
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
+# Hardcoded Hugging Face Token (replace with your actual token)
+HF_TOKEN = "your_hugging_face_token_here"
+login(HF_TOKEN)
+
+# Load Depth Anything V2 (apple/DepthPro-hf)
+processor = AutoProcessor.from_pretrained("apple/DepthPro-hf")
+model = AutoModelForDepthEstimation.from_pretrained("apple/DepthPro-hf")
+
 # Sliding window size for recent frames
 SLIDING_WINDOW_SIZE = 10
 
-# Function to prepare data for Instant-NGP
+# Function to generate depth maps
+def generate_depth_map(image):
+    inputs = processor(images=image, return_tensors="pt").to(device)
+    with torch.no_grad():
+        outputs = model(**inputs)
+        predicted_depth = outputs.predicted_depth
+    depth_map = predicted_depth.squeeze().cpu().numpy()
+    return depth_map
+
+# Function to generate camera pose from depth map
+def generate_camera_pose_from_depth(depth_map):
+    # Placeholder for actual depth map processing to generate camera pose
+    # This is a simplified example, replace with actual pose estimation logic
+    height, width = depth_map.shape
+    focal_length = 0.5 * width / np.tan(0.5 * 0.6911112070083618)  # Example focal length calculation
+
+    # Example camera pose (identity matrix)
+    pose = np.eye(4)
+    return pose.tolist()
+
+# Function to prepare data for Instant-NGP using depth maps
 def prepare_instant_ngp_data(frames, workspace_folder):
     # Create the required directory structure
     data_folder = os.path.join(workspace_folder, 'data')
     os.makedirs(data_folder, exist_ok=True)
 
-    # Save frames to the data folder
+    # Save frames and generate depth maps
+    transforms = {
+        "camera_angle_x": 0.6911112070083618,
+        "frames": []
+    }
+
     for i, frame in enumerate(frames):
         frame_path = os.path.join(data_folder, f"frame_{i:04d}.jpg")
         cv2.imwrite(frame_path, frame)
 
-    # Generate a dummy transforms.json file (replace with actual camera poses if available)
-    transforms = {
-        "camera_angle_x": 0.6911112070083618,
-        "frames": [
-            {
-                "file_path": f"./frame_{i:04d}.jpg",
-                "transform_matrix": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]
-            }
-            for i in range(len(frames))
-        ]
-    }
+        # Generate depth map
+        depth_map = generate_depth_map(frame)
+        depth_path = os.path.join(data_folder, f"depth_{i:04d}.npy")
+        np.save(depth_path, depth_map)
+
+        # Generate camera pose from depth map
+        pose = generate_camera_pose_from_depth(depth_map)
+
+        transforms["frames"].append({
+            "file_path": frame_path,
+            "depth_file_path": depth_path,
+            "transform_matrix": pose,
+            "w": frame.shape[1],
+            "h": frame.shape[0]
+        })
 
     with open(os.path.join(data_folder, 'transforms.json'), 'w') as f:
         json.dump(transforms, f, indent=4)
@@ -55,9 +94,14 @@ def run_instant_ngp(frames, workspace_folder):
     # Prepare data for Instant-NGP
     prepare_instant_ngp_data(frames, workspace_folder)
 
-    # Load the scene and train the model on recent frames
-    scene = ngp.load_scene(f"{workspace_folder}/data")
-    ngp.train(scene)
+    # Initialize the NGP model
+    ngp_model = ngp.Testbed(ngp.TestbedMode.Nerf)
+
+    # Load the scene
+    ngp_model.load_training_data(f"{workspace_folder}/data")
+
+    # Train the model
+    ngp_model.train()
 
 # Main Execution
 if __name__ == "__main__":
