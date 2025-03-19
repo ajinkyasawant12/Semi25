@@ -7,6 +7,7 @@ import psutil
 from concurrent.futures import ThreadPoolExecutor
 import subprocess
 import json
+import shutil
 
 # Set up device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -43,7 +44,7 @@ def run_instant_ngp(image_folder, workspace_folder):
     prepare_instant_ngp_data(image_folder, workspace_folder)
     
     # Train Instant-NGP
-    subprocess.run(["./build/testbed", "--scene", f"{workspace_folder}/data"])
+    subprocess.run(["./build/instant-ngp", "--scene", f"{workspace_folder}/data"])
 
 # Main Execution
 if __name__ == "__main__":
