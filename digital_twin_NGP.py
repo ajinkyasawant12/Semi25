@@ -19,56 +19,57 @@ import pyngp as ngp
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
+# Sliding window size for recent frames
+SLIDING_WINDOW_SIZE = 10
+
 # Function to prepare data for Instant-NGP
-def prepare_instant_ngp_data(image_folder, workspace_folder):
+def prepare_instant_ngp_data(frames, workspace_folder):
     # Create the required directory structure
     data_folder = os.path.join(workspace_folder, 'data')
     os.makedirs(data_folder, exist_ok=True)
-    
-    # Copy images to the data folder
-    for filename in os.listdir(image_folder):
-        if filename.endswith('.jpg'):
-            shutil.copy(os.path.join(image_folder, filename), data_folder)
-    
-    # Generate a dummy transforms.json file (you need to replace this with actual camera poses)
+
+    # Save frames to the data folder
+    for i, frame in enumerate(frames):
+        frame_path = os.path.join(data_folder, f"frame_{i:04d}.jpg")
+        cv2.imwrite(frame_path, frame)
+
+    # Generate a dummy transforms.json file (replace with actual camera poses if available)
     transforms = {
         "camera_angle_x": 0.6911112070083618,
         "frames": [
-            {"file_path": f"./{filename}", "transform_matrix": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]}
-            for filename in os.listdir(data_folder) if filename.endswith('.jpg')
+            {
+                "file_path": f"./frame_{i:04d}.jpg",
+                "transform_matrix": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]
+            }
+            for i in range(len(frames))
         ]
     }
-    
+
     with open(os.path.join(data_folder, 'transforms.json'), 'w') as f:
         json.dump(transforms, f, indent=4)
 
-# Function to run Instant-NGP for 3D reconstruction
-def run_instant_ngp(image_folder, workspace_folder):
+# Function to run Instant-NGP for real-time reconstruction
+def run_instant_ngp(frames, workspace_folder):
     os.makedirs(workspace_folder, exist_ok=True)
-    
+
     # Prepare data for Instant-NGP
-    prepare_instant_ngp_data(image_folder, workspace_folder)
-    
-    # Load the scene
+    prepare_instant_ngp_data(frames, workspace_folder)
+
+    # Load the scene and train the model on recent frames
     scene = ngp.load_scene(f"{workspace_folder}/data")
-    
-    # Train the model
     ngp.train(scene)
 
 # Main Execution
 if __name__ == "__main__":
-    video_path = '/content/large.mp4'  # Update this path to your video file
-    cap = cv2.VideoCapture(video_path)
+    # Use live camera feed instead of video file
+    cap = cv2.VideoCapture(0)  # Replace '0' with your camera index if multiple cameras are connected
 
-    frames = []
+    sliding_window = []
     frame_skip = 5  # Process every 5th frame to reduce load
-
     start_time = time.time()
     frame_count = 0
 
-    image_folder = '/content/datafiles'
     workspace_folder = '/content/workspace'
-    os.makedirs(image_folder, exist_ok=True)
     os.makedirs(workspace_folder, exist_ok=True)
 
     with ThreadPoolExecutor(max_workers=4) as executor:
@@ -80,13 +81,18 @@ if __name__ == "__main__":
             if frame_count % frame_skip == 0:
                 # Downsample the frame to reduce computational load
                 frame = cv2.resize(frame, (640, 480))
-                frames.append(frame)
-                frame_path = os.path.join(image_folder, f"frame_{frame_count:04d}.jpg")
-                cv2.imwrite(frame_path, frame)
+
+                # Add the frame to sliding window buffer
+                sliding_window.append(frame)
+                if len(sliding_window) > SLIDING_WINDOW_SIZE:
+                    sliding_window.pop(0)  # Maintain sliding window size
+
+                # Process the current sliding window using Instant-NGP
+                executor.submit(run_instant_ngp, sliding_window.copy(), workspace_folder)
 
             frame_count += 1
 
-            # Monitor system and GPU memory usage
+            # Monitor system and GPU memory usage (optional)
             system_memory = psutil.virtual_memory()
             gpu_memory = torch.cuda.memory_allocated()
             print(f"System Memory Usage: {system_memory.percent}%")
@@ -94,15 +100,7 @@ if __name__ == "__main__":
 
             torch.cuda.empty_cache()
 
-    cap.release()
-
-    # Save frames to image folder for Instant-NGP
-    for i, frame in enumerate(frames):
-        frame_path = os.path.join(image_folder, f"frame_{i:04d}.jpg")
-        cv2.imwrite(frame_path, frame)
-
-    # Run Instant-NGP to generate 3D model
-    run_instant_ngp(image_folder, workspace_folder)
+        cap.release()
 
     end_time = time.time()
     print(f"Total processing time: {end_time - start_time} seconds")
