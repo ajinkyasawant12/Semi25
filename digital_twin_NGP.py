@@ -10,6 +10,8 @@ import shutil
 import sys
 from transformers import AutoProcessor, AutoModelForDepthEstimation
 from huggingface_hub import login
+from scipy.spatial.transform import Rotation as R
+from IPython.display import Image, display, clear_output
 
 # Add the path to the Instant-NGP Python bindings
 sys.path.append('/content/instant-ngp/build')
@@ -21,7 +23,7 @@ import pyngp as ngp
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
-# Hardcoded Hugging Face Token (replace with your actual token)
+# Hardcoded Hugging Face Token (replace with actual token)
 HF_TOKEN = "your_hugging_face_token_here"
 login(HF_TOKEN)
 
@@ -43,13 +45,37 @@ def generate_depth_map(image):
 
 # Function to generate camera pose from depth map
 def generate_camera_pose_from_depth(depth_map):
-    # Placeholder for actual depth map processing to generate camera pose
-    # This is a simplified example, replace with actual pose estimation logic
     height, width = depth_map.shape
     focal_length = 0.5 * width / np.tan(0.5 * 0.6911112070083618)  # Example focal length calculation
 
-    # Example camera pose (identity matrix)
+    # Generate 3D points from depth map
+    i, j = np.meshgrid(np.arange(width), np.arange(height), indexing='xy')
+    z = depth_map
+    x = (i - width / 2) * z / focal_length
+    y = (j - height / 2) * z / focal_length
+    points_3d = np.stack((x, y, z), axis=-1).reshape(-1, 3)
+
+    # Generate corresponding 2D points
+    points_2d = np.stack((i, j), axis=-1).reshape(-1, 2)
+
+    # Camera intrinsic matrix
+    K = np.array([
+        [focal_length, 0, width / 2],
+        [0, focal_length, height / 2],
+        [0, 0, 1]
+    ])
+
+    # Use PnP to estimate camera pose
+    _, rvec, tvec = cv2.solvePnP(points_3d, points_2d, K, None)
+
+    # Convert rotation vector to rotation matrix
+    R_mat, _ = cv2.Rodrigues(rvec)
+
+    # Create 4x4 transformation matrix
     pose = np.eye(4)
+    pose[:3, :3] = R_mat
+    pose[:3, 3] = tvec.squeeze()
+
     return pose.tolist()
 
 # Function to prepare data for Instant-NGP using depth maps
@@ -88,20 +114,28 @@ def prepare_instant_ngp_data(frames, workspace_folder):
         json.dump(transforms, f, indent=4)
 
 # Function to run Instant-NGP for real-time reconstruction
-def run_instant_ngp(frames, workspace_folder):
+def run_instant_ngp(frames, workspace_folder, ngp_model):
     os.makedirs(workspace_folder, exist_ok=True)
 
     # Prepare data for Instant-NGP
     prepare_instant_ngp_data(frames, workspace_folder)
-
-    # Initialize the NGP model
-    ngp_model = ngp.Testbed(ngp.TestbedMode.Nerf)
 
     # Load the scene
     ngp_model.load_training_data(f"{workspace_folder}/data")
 
     # Train the model
     ngp_model.train()
+
+    # Render the output image
+    output_folder = os.path.join(workspace_folder, 'output')
+    os.makedirs(output_folder, exist_ok=True)
+    ngp_model.render_to_file(os.path.join(output_folder, 'render.png'))
+
+    # Display the output render
+    output_image_path = os.path.join(output_folder, 'render.png')
+    if os.path.exists(output_image_path):
+        clear_output(wait=True)
+        display(Image(filename=output_image_path))
 
 # Main Execution
 if __name__ == "__main__":
@@ -115,6 +149,9 @@ if __name__ == "__main__":
 
     workspace_folder = '/content/workspace'
     os.makedirs(workspace_folder, exist_ok=True)
+
+    # Initialize the NGP model
+    ngp_model = ngp.Testbed(ngp.TestbedMode.Nerf)
 
     with ThreadPoolExecutor(max_workers=4) as executor:
         while cap.isOpened():
@@ -132,7 +169,7 @@ if __name__ == "__main__":
                     sliding_window.pop(0)  # Maintain sliding window size
 
                 # Process the current sliding window using Instant-NGP
-                executor.submit(run_instant_ngp, sliding_window.copy(), workspace_folder)
+                executor.submit(run_instant_ngp, sliding_window.copy(), workspace_folder, ngp_model)
 
             frame_count += 1
 
