@@ -1,10 +1,13 @@
+# Install specific version of timm
+!pip install timm==0.4.12
+
 import os
 import cv2
 import torch
 import numpy as np
 import time
 import psutil
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import shutil
 import sys
@@ -29,10 +32,11 @@ login(HF_TOKEN)
 
 # Load Depth Anything V2 (apple/DepthPro-hf)
 processor = AutoProcessor.from_pretrained("apple/DepthPro-hf")
-model = AutoModelForDepthEstimation.from_pretrained("apple/DepthPro-hf")
+model = AutoModelForDepthEstimation.from_pretrained("apple/DepthPro-hf").to(device)
 
 # Sliding window size for recent frames
 SLIDING_WINDOW_SIZE = 10
+FRAME_SKIP = 5  # Process every 5th frame
 
 # Function to generate depth maps
 def generate_depth_map(image):
@@ -40,7 +44,7 @@ def generate_depth_map(image):
     with torch.no_grad():
         outputs = model(**inputs)
         predicted_depth = outputs.predicted_depth
-    depth_map = predicted_depth.squeeze().cpu().numpy()
+        depth_map = predicted_depth.squeeze().cpu().numpy()
     return depth_map
 
 # Function to generate camera pose from depth map
@@ -53,6 +57,7 @@ def generate_camera_pose_from_depth(depth_map):
     z = depth_map
     x = (i - width / 2) * z / focal_length
     y = (j - height / 2) * z / focal_length
+
     points_3d = np.stack((x, y, z), axis=-1).reshape(-1, 3)
 
     # Generate corresponding 2D points
@@ -66,16 +71,18 @@ def generate_camera_pose_from_depth(depth_map):
     ])
 
     # Use PnP to estimate camera pose
-    _, rvec, tvec = cv2.solvePnP(points_3d, points_2d, K, None)
+    try:
+        _, rvec, tvec = cv2.solvePnP(points_3d.astype(np.float32), points_2d.astype(np.float32), K, None)
+        # Convert rotation vector to rotation matrix
+        R_mat, _ = cv2.Rodrigues(rvec)
 
-    # Convert rotation vector to rotation matrix
-    R_mat, _ = cv2.Rodrigues(rvec)
-
-    # Create 4x4 transformation matrix
-    pose = np.eye(4)
-    pose[:3, :3] = R_mat
-    pose[:3, 3] = tvec.squeeze()
-
+        # Create 4x4 transformation matrix
+        pose = np.eye(4)
+        pose[:3, :3] = R_mat
+        pose[:3, 3] = tvec.squeeze()
+    except Exception as e:
+        print(f"Error in solvePnP: {e}")
+        return np.eye(4).tolist()  # Return identity matrix on error
     return pose.tolist()
 
 # Function to prepare data for Instant-NGP using depth maps
@@ -103,15 +110,25 @@ def prepare_instant_ngp_data(frames, workspace_folder):
         pose = generate_camera_pose_from_depth(depth_map)
 
         transforms["frames"].append({
-            "file_path": frame_path,
-            "depth_file_path": depth_path,
+            "file_path": f"./frame_{i:04d}.jpg",  # Relative path
+            "depth_file_path": f"./depth_{i:04d}.npy",  # Relative path
             "transform_matrix": pose,
             "w": frame.shape[1],
             "h": frame.shape[0]
         })
 
-    with open(os.path.join(data_folder, 'transforms.json'), 'w') as f:
-        json.dump(transforms, f, indent=4)
+    # Write transforms.json file in a controlled way
+    transforms_path = os.path.join(data_folder, 'transforms.json')
+    try:
+        with open(transforms_path, 'w') as f:
+            json.dump(transforms, f, indent=4)
+        print(f"transforms.json created at {transforms_path}")
+    except IOError as e:
+        print(f"IOError writing transforms.json: {e}")
+    except TypeError as e:
+        print(f"TypeError writing transforms.json: {e}")
+    except Exception as e:
+        print(f"Error writing transforms.json: {e}")
 
 # Function to run Instant-NGP for real-time reconstruction
 def run_instant_ngp(frames, workspace_folder, ngp_model):
@@ -121,29 +138,48 @@ def run_instant_ngp(frames, workspace_folder, ngp_model):
     prepare_instant_ngp_data(frames, workspace_folder)
 
     # Load the scene
-    ngp_model.load_training_data(f"{workspace_folder}/data")
+    try:
+        ngp_model.load_training_data(f"{workspace_folder}/data")
+        print("Loaded training data successfully.")
+    except Exception as e:
+        print(f"Error loading training data: {e}")
+        return
 
     # Train the model
-    ngp_model.train()
+    try:
+        ngp_model.train()
+        print("Training completed successfully.")
+    except Exception as e:
+        print(f"Error during training: {e}")
+        return
 
     # Render the output image
     output_folder = os.path.join(workspace_folder, 'output')
     os.makedirs(output_folder, exist_ok=True)
-    ngp_model.render_to_file(os.path.join(output_folder, 'render.png'))
 
-    # Display the output render
-    output_image_path = os.path.join(output_folder, 'render.png')
-    if os.path.exists(output_image_path):
-        clear_output(wait=True)
-        display(Image(filename=output_image_path))
+    try:
+        output_image_path = os.path.join(output_folder, 'render.png')
+        ngp_model.render_to_file(output_image_path)
+        print(f"Render saved to {output_image_path}")
+
+        # Display the output render
+        if os.path.exists(output_image_path):
+            clear_output(wait=True)
+            display(Image(filename=output_image_path))
+        else:
+            print("Render image not found.")
+
+    except Exception as e:
+        print(f"Error during rendering or display: {e}")
 
 # Main Execution
 if __name__ == "__main__":
-    # Use live camera feed instead of video file
-    cap = cv2.VideoCapture(0)  # Replace '0' with your camera index if multiple cameras are connected
+    # Use pre-recorded video file instead of live camera feed
+    video_path = '/content/large.mp4'  # Update this path to your video file
+    cap = cv2.VideoCapture(video_path)
 
     sliding_window = []
-    frame_skip = 5  # Process every 5th frame to reduce load
+    frame_skip = FRAME_SKIP  # Process every 5th frame
     start_time = time.time()
     frame_count = 0
 
@@ -154,6 +190,8 @@ if __name__ == "__main__":
     ngp_model = ngp.Testbed(ngp.TestbedMode.Nerf)
 
     with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = []  # Store futures
+
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
@@ -168,8 +206,12 @@ if __name__ == "__main__":
                 if len(sliding_window) > SLIDING_WINDOW_SIZE:
                     sliding_window.pop(0)  # Maintain sliding window size
 
-                # Process the current sliding window using Instant-NGP
-                executor.submit(run_instant_ngp, sliding_window.copy(), workspace_folder, ngp_model)
+                # Debug: Print the number of frames in the sliding window
+                print(f"Sliding window size: {len(sliding_window)}")
+
+                # Submit the task to the executor
+                future = executor.submit(run_instant_ngp, sliding_window.copy(), workspace_folder, ngp_model)
+                futures.append(future)  # Append future to the list
 
             frame_count += 1
 
@@ -178,10 +220,16 @@ if __name__ == "__main__":
             gpu_memory = torch.cuda.memory_allocated()
             print(f"System Memory Usage: {system_memory.percent}%")
             print(f"GPU Memory Usage: {gpu_memory / (1024 ** 2)} MB")
-
             torch.cuda.empty_cache()
 
         cap.release()
 
-    end_time = time.time()
-    print(f"Total processing time: {end_time - start_time} seconds")
+        # Wait for all tasks to complete
+        for future in as_completed(futures):
+            try:
+                future.result()  # Get the result (or exception if any)
+            except Exception as e:
+                print(f"Exception in thread: {e}")
+
+        end_time = time.time()
+        print(f"Total processing time: {end_time - start_time} seconds")
